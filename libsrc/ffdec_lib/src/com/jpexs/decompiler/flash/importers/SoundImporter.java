@@ -384,6 +384,21 @@ public class SoundImporter {
                 return false;
         }
 
+        // A same-format MP3 replacement must not rebuild the timeline.
+        // addStream() redistributes MP3 frames and recreates SoundStreamBlock
+        // tags, which changes frame synchronization and SeekSamples.
+        // Reuse each existing block and its 4-byte MP3 stream header instead.
+        // The replacement MUST have the exact same number of MP3 samples
+        // represented by the original blocks; otherwise fail without changes.
+        if (startFrame == null
+                && newSoundFormat == SoundFormat.FORMAT_MP3
+                && streamHead.getSoundFormatId() == SoundFormat.FORMAT_MP3
+                && newSoundRate == streamHead.getSoundRate()
+                && newSoundSize == streamHead.getSoundSize()
+                && newSoundType == streamHead.getSoundType()) {
+            return replaceMp3StreamBlocksInPlace(streamHead, mp3Frames);
+        }
+
         if (startFrame != null) {
             if (newSoundFormat != streamHead.getSoundFormatId()
                     || newSoundSize != streamHead.getSoundSize()
@@ -453,6 +468,85 @@ public class SoundImporter {
         streamHead.setModified(true);
         streamHead.getTimelined().resetTimeline();
         swf.resetTimeline(); //to reload blocks
+        return true;
+    }
+
+    /**
+     * Replaces the MP3 bytes without moving, adding or removing SWF tags.
+     *
+     * Each SoundStreamBlock contains UI16 SampleCount, SI16 SeekSamples,
+     * followed by complete MP3 frames. Both two-byte values are retained
+     * byte-for-byte, together with the tag's position on the SWF timeline.
+     *
+     * This strict path is intended for a same-duration/same-sample-format MP3
+     * replacement. If a frame does not fit exactly, it returns false BEFORE
+     * modifying anything, instead of silently introducing audio drift.
+     */
+    private boolean replaceMp3StreamBlocksInPlace(
+            SoundStreamHeadTypeTag streamHead,
+            List<MP3FRAME> incomingFrames) {
+
+        if (incomingFrames == null || incomingFrames.isEmpty()) {
+            return false;
+        }
+
+        List<SoundStreamBlockTag> oldBlocks = new ArrayList<>();
+        for (SoundStreamFrameRange range : streamHead.getRanges()) {
+            oldBlocks.addAll(range.blocks);
+        }
+        if (oldBlocks.isEmpty()) {
+            return false;
+        }
+
+        // Build all replacement payloads first. No partial edits on failure.
+        List<byte[]> newPayloads = new ArrayList<>(oldBlocks.size());
+        int incomingPos = 0;
+
+        for (SoundStreamBlockTag block : oldBlocks) {
+            byte[] oldBytes = block.streamSoundData.getRangeData();
+            if (oldBytes.length < 4) {
+                return false;
+            }
+
+            // Flash stores these as little-endian UI16 and SI16. The two
+            // fields are kept unchanged, including the original SeekSamples.
+            int remainingSamples = (oldBytes[0] & 0xFF)
+                    | ((oldBytes[1] & 0xFF) << 8);
+
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            out.write(oldBytes, 0, 4);
+
+            while (remainingSamples > 0) {
+                if (incomingPos >= incomingFrames.size()) {
+                    return false;
+                }
+                MP3FRAME frame = incomingFrames.get(incomingPos);
+                int frameSamples = frame.getSampleCount();
+                byte[] frameBytes = frame.getBytes();
+                if (frameSamples <= 0 || frameSamples > remainingSamples
+                        || frameBytes == null || frameBytes.length == 0) {
+                    return false;
+                }
+
+                out.write(frameBytes, 0, frameBytes.length);
+                remainingSamples -= frameSamples;
+                incomingPos++;
+            }
+            newPayloads.add(out.toByteArray());
+        }
+
+        if (incomingPos != incomingFrames.size()) {
+            return false; // Extra MP3 frames: cannot preserve the layout.
+        }
+
+        for (int i = 0; i < oldBlocks.size(); i++) {
+            SoundStreamBlockTag block = oldBlocks.get(i);
+            block.streamSoundData = new ByteArrayRange(newPayloads.get(i));
+            block.setModified(true);
+        }
+        streamHead.setModified(true);
+        streamHead.getTimelined().resetTimeline();
+        streamHead.getSwf().resetTimeline();
         return true;
     }
 
