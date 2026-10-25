@@ -1,0 +1,49 @@
+name: Build MP3 Stream Sync Fix
+
+on:
+  push:
+    branches:
+      - fix/mp3-stream-sync
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mp3-stream-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build JPEXS (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Java 23
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+
+      - name: Install Apache Ant
+        shell: pwsh
+        run: choco install ant --yes --no-progress
+
+      - name: Build JPEXS
+        shell: pwsh
+        run: ant build
+
+      - name: Upload compiled JPEXS
+        uses: actions/upload-artifact@v4
+        with:
+          name: JPEXS-MP3-Stream-Sync-Fix
+          path: |
+            dist/**
+            libsrc/ffdec_lib/dist/**
+          if-no-files-found: error
+          retention-days: 7
